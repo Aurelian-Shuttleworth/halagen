@@ -139,15 +139,24 @@ class LabelMaker {
         const downloadPng = document.getElementById('download-png');
         const validateYaml = document.getElementById('validate-yaml');
         const generateZip = document.getElementById('generate-zip');
-        
-        if (iconSelect) iconSelect.addEventListener('change', () => this.updatePreview());
-        if (labelHeight) labelHeight.addEventListener('change', () => this.updatePreview());
-        if (labelWidth) labelWidth.addEventListener('input', () => this.updatePreview());
+
+        if (iconSelect) iconSelect.addEventListener('change', () => {
+            this.updatePreview();
+            this.syncSingleToYaml();
+        });
+        if (labelHeight) labelHeight.addEventListener('change', () => {
+            this.updatePreview();
+            this.syncSingleToYaml();
+        });
+        if (labelWidth) labelWidth.addEventListener('input', () => {
+            this.updatePreview();
+            this.syncSingleToYaml();
+        });
         if (downloadPng) downloadPng.addEventListener('click', () => this.downloadPNG());
-        
+
         // Dimension arrow controls
         this.initializeDimensionArrows();
-        
+
         // DPI preset buttons
         document.querySelectorAll('[data-dpi]').forEach(btn => {
             btn.addEventListener('click', (e) => {
@@ -155,15 +164,15 @@ class LabelMaker {
                 document.getElementById('png-dpi').value = dpi;
             });
         });
-        
+
         const downloadSvg = document.getElementById('download-svg');
         if (downloadSvg) downloadSvg.addEventListener('click', () => this.downloadSVG());
         if (validateYaml) validateYaml.addEventListener('click', () => this.validateYAML());
         if (generateZip) generateZip.addEventListener('click', () => this.generateZIP());
-        
+
         // WYSIWYG preview interactions
         this.setupPreviewInteractions();
-        
+
         // Initial setup for text inputs
         this.setupMainTextInputs();
         this.setupSubTextInputs();
@@ -262,7 +271,7 @@ class LabelMaker {
         // Sync main text
         const mainTextColumns = document.querySelectorAll('.main-text-column');
         const mainTextInputs = document.querySelectorAll('.main-text-input');
-        
+
         mainTextColumns.forEach((column, index) => {
             if (mainTextInputs[index]) {
                 mainTextInputs[index].value = column.textContent.trim();
@@ -272,12 +281,84 @@ class LabelMaker {
         // Sync sub text
         const subTextColumns = document.querySelectorAll('.sub-text-column');
         const subTextInputs = document.querySelectorAll('.sub-text-input');
-        
+
         subTextColumns.forEach((column, index) => {
             if (subTextInputs[index]) {
                 subTextInputs[index].value = column.textContent.trim();
             }
         });
+
+        // Sync to YAML
+        this.syncSingleToYaml();
+    }
+
+    syncSingleToYaml() {
+        // Only sync if YAML editor is initialized
+        if (!this.yamlEditor) {
+            return;
+        }
+
+        // Get current state from single tab
+        const iconSelect = document.getElementById('icon-select').value;
+        const width = parseInt(document.getElementById('label-width').value);
+        const height = parseInt(document.getElementById('label-height').value);
+
+        const mainTextInputs = document.querySelectorAll('.main-text-input');
+        const mainTexts = Array.from(mainTextInputs).map(input => input.value.trim()).filter(text => text);
+
+        const subTextInputs = document.querySelectorAll('.sub-text-input');
+        const subTexts = Array.from(subTextInputs).map(input => input.value.trim()).filter(text => text);
+
+        // Generate YAML for the current label
+        let yamlContent = `# Hardware Label Generator - Current Label from Single Tab
+# This YAML is auto-synced with the Single tab
+# Available icons: ${this.availableIcons.join(', ')}
+
+# Global settings (optional)
+long_png: true        # Generate one continuous PNG strip of all labels
+cut_marks: true       # Add cut marks between labels for easy trimming
+export_svg: true      # Also generate SVG files (vector format, scalable)
+png_dpi: 300          # PNG export resolution in dots per inch (50-1200)
+
+labels:
+  - icon: "${iconSelect}"
+    width_mm: ${width}
+    height_mm: ${height}`;
+
+        // Add main text columns
+        if (mainTexts.length > 0) {
+            yamlContent += `\n    maintext_columns:`;
+            mainTexts.forEach(text => {
+                yamlContent += `\n      - "${text}"`;
+            });
+        }
+
+        // Add sub text columns
+        if (subTexts.length > 0) {
+            yamlContent += `\n    subtext_columns:`;
+            subTexts.forEach(text => {
+                yamlContent += `\n      - "${text}"`;
+            });
+        }
+
+        yamlContent += `\n    rotate: false
+
+# You can add more labels below by copying the format above
+# Example:
+# - icon: "heads_phillips"
+#   width_mm: 50
+#   height_mm: 12
+#   maintext_columns:
+#     - "M4"
+#     - "M4"
+#   subtext_columns:
+#     - "16 mm"
+#     - "20 mm"
+#   rotate: false
+`;
+
+        // Update the YAML editor
+        this.yamlEditor.setValue(yamlContent);
     }
 
 
@@ -315,18 +396,19 @@ class LabelMaker {
         const isMain = type === 'main';
         const container = document.getElementById(isMain ? 'main-text-inputs' : 'sub-text-inputs');
         const inputClass = isMain ? 'main-text-input' : 'sub-text-input';
-        
+
         let currentCount = container.querySelectorAll(`.${inputClass}`).length;
-        
+
         if (action === 'add' && currentCount < 8) {
             currentCount++;
         } else if (action === 'remove' && currentCount > 1) {
             currentCount--;
         }
-        
+
         this.updateTextInputs(container, inputClass, currentCount, isMain);
         this.updateColumnDisplay(type, currentCount);
         this.updatePreviewFromInputs();
+        this.syncSingleToYaml();
     }
 
     updateColumnDisplay(type, count) {
@@ -820,16 +902,17 @@ class LabelMaker {
         tabButtons.forEach(button => {
             button.addEventListener('click', () => {
                 const targetTab = button.dataset.tab;
-                
+
                 tabButtons.forEach(btn => btn.classList.remove('active'));
                 tabContents.forEach(content => content.style.display = 'none');
-                
+
                 button.classList.add('active');
                 document.getElementById(`${targetTab}-tab`).style.display = 'block';
-                
+
                 // Refresh CodeMirror editor when batch tab becomes visible
                 if (targetTab === 'batch' && this.yamlEditor) {
                     setTimeout(() => {
+                        this.syncSingleToYaml();
                         this.yamlEditor.refresh();
                     }, 100);
                 }
@@ -1547,10 +1630,15 @@ labels:
 
         // Update the editor when the tab becomes visible
         this.yamlEditor.refresh();
-        
+
         // Load template after editor is ready
         this.generatePrompt();
-        
+
+        // Sync initial state from single tab
+        setTimeout(() => {
+            this.syncSingleToYaml();
+        }, 100);
+
     }
 
     initializeIconPicker() {
@@ -1689,11 +1777,11 @@ labels:
 
     selectIcon(iconKey) {
         this.selectedIcon = iconKey;
-        
+
         // Get icon path and display name
         const iconPath = this.icons[iconKey] || this.customIcons[iconKey];
         const displayName = this.iconNames[iconKey] || iconKey.replace('Custom_', '').replace(/_/g, ' ');
-        
+
         // Update the selected icon display
         const selectedIconDiv = document.querySelector('.selected-icon');
         selectedIconDiv.dataset.icon = iconKey;
@@ -1715,6 +1803,7 @@ labels:
         // Close picker and update preview
         this.closeIconPicker();
         this.updatePreview();
+        this.syncSingleToYaml();
     }
 
     openIconPicker() {
