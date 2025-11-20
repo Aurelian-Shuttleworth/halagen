@@ -1729,7 +1729,8 @@ labels:
                 iconDiv.innerHTML = `
                     <img src="${this.customIcons[iconKey]}" alt="${iconKey}">
                     <span>${iconKey.replace('Custom_', '').replace(/_/g, ' ')}</span>
-                    <button class="delete-icon-btn" onclick="event.stopPropagation(); labelMaker.deleteCustomIcon('${iconKey}')">×</button>
+                    <button class="rename-icon-btn" onclick="event.stopPropagation(); labelMaker.renameCustomIcon('${iconKey}')" title="Rename icon">✎</button>
+                    <button class="delete-icon-btn" onclick="event.stopPropagation(); labelMaker.deleteCustomIcon('${iconKey}')" title="Delete icon">×</button>
                 `;
 
                 iconDiv.addEventListener('click', () => {
@@ -1872,13 +1873,63 @@ labels:
         });
     }
 
+    renameCustomIcon(iconKey) {
+        const currentName = iconKey.replace('Custom_', '').replace(/_/g, ' ');
+        const newName = prompt(`Rename custom icon:\n\nCurrent name: ${currentName}\n\nEnter new name (alphanumeric and spaces only):`, currentName);
+
+        if (!newName || newName.trim() === '') {
+            return; // User cancelled or entered empty name
+        }
+
+        // Sanitize the new name
+        const sanitizedName = newName.trim().replace(/[^a-zA-Z0-9\s]/g, '').replace(/\s+/g, '_');
+
+        if (!sanitizedName) {
+            alert('Invalid name. Please use only letters, numbers, and spaces.');
+            return;
+        }
+
+        // Create new key with Custom_ prefix
+        const newKey = `Custom_${sanitizedName}`;
+
+        // Check if the new name already exists
+        if (newKey !== iconKey && (this.icons[newKey] || this.customIcons[newKey])) {
+            alert(`An icon with the name "${sanitizedName}" already exists. Please choose a different name.`);
+            return;
+        }
+
+        // If the name hasn't changed, do nothing
+        if (newKey === iconKey) {
+            return;
+        }
+
+        // Copy the icon data to the new key
+        this.customIcons[newKey] = this.customIcons[iconKey];
+
+        // Delete the old key
+        delete this.customIcons[iconKey];
+
+        // Save changes
+        this.saveCustomIcons();
+        this.loadAvailableIcons();
+        this.populateIconGrid();
+
+        // If this was the selected icon, update the selection to use new key
+        if (this.selectedIcon === iconKey) {
+            this.selectIcon(newKey);
+        }
+
+        // Sync to YAML to reflect the new name
+        this.syncSingleToYaml();
+    }
+
     deleteCustomIcon(iconKey) {
         if (confirm(`Are you sure you want to delete the custom icon "${iconKey}"?`)) {
             delete this.customIcons[iconKey];
             this.saveCustomIcons();
             this.loadAvailableIcons();
             this.populateIconGrid();
-            
+
             // If this was the selected icon, switch to default
             if (this.selectedIcon === iconKey) {
                 this.selectIcon('heads_hex_socket');
