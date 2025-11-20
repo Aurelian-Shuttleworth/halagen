@@ -741,12 +741,38 @@ body {
     padding: 0;
 }
 
-.icon-picker-item:hover .delete-icon-btn {
+.rename-icon-btn {
+    position: absolute;
+    top: 2px;
+    right: 22px;
+    background: #0d6efd;
+    color: white;
+    border: none;
+    border-radius: 50%;
+    width: 18px;
+    height: 18px;
+    font-size: 10px;
+    line-height: 1;
+    cursor: pointer;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+    padding: 0;
+    font-weight: bold;
+}
+
+.icon-picker-item:hover .delete-icon-btn,
+.icon-picker-item:hover .rename-icon-btn {
     display: flex;
 }
 
 .delete-icon-btn:hover {
     background: #c82333;
+}
+
+.rename-icon-btn:hover {
+    background: #0b5ed7;
 }
 
 /* Footer Styles */
