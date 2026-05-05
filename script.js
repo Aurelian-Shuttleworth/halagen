@@ -12,6 +12,7 @@ class LabelMaker {
         this.initializeIconPicker();
         this.initializeIconUpload();
         this.loadDPISettings();
+        this.initializePrinter();
     }
 
     loadIconsFromStructure() {
@@ -1992,6 +1993,681 @@ labels:
             localStorage.setItem('dpiSettings', JSON.stringify(settings));
         } catch (error) {
             console.error('Error saving DPI settings:', error);
+        }
+    }
+
+    // =========================================================================
+    // Printer Integration (NiimBlueLib — Bluetooth + Serial/USB)
+    // =========================================================================
+
+    /** Returns the currently selected connection mode ('bluetooth' or 'serial') */
+    getConnectionMode() {
+        const checked = document.querySelector('input[name="conn-mode"]:checked');
+        return checked ? checked.value : 'serial';
+    }
+
+    initializePrinter() {
+        const section = document.getElementById('printer-section');
+        const unavailable = document.getElementById('printer-unavailable');
+
+        // Feature detection: need at least one of Web Bluetooth or Web Serial
+        const hasBluetooth = !!navigator.bluetooth;
+        const hasSerial = !!navigator.serial;
+
+        if (!hasBluetooth && !hasSerial) {
+            if (section) section.style.display = 'none';
+            if (unavailable) unavailable.style.display = 'block';
+            console.log('[Printer] Neither Web Bluetooth nor Web Serial API available');
+            return;
+        }
+
+        // Check NiimBlueLib loaded
+        if (typeof niimbluelib === 'undefined') {
+            if (section) section.style.display = 'none';
+            if (unavailable) {
+                unavailable.style.display = 'block';
+                unavailable.querySelector('.alert').textContent =
+                    '\u{1F5A8}\uFE0F NiimBlueLib failed to load. Check your internet connection.';
+            }
+            console.error('[Printer] NiimBlueLib not loaded');
+            return;
+        }
+
+        // Show the printer section
+        if (section) section.style.display = 'block';
+        if (unavailable) unavailable.style.display = 'none';
+
+        // Disable unavailable modes
+        const bleRadio = document.getElementById('conn-mode-ble');
+        const serialRadio = document.getElementById('conn-mode-serial');
+        const bleLabel = document.querySelector('label[for="conn-mode-ble"]');
+        const serialLabel = document.querySelector('label[for="conn-mode-serial"]');
+
+        if (!hasBluetooth && bleRadio) {
+            bleRadio.disabled = true;
+            if (bleLabel) bleLabel.title = 'Web Bluetooth not available in this browser';
+        }
+        if (!hasSerial && serialRadio) {
+            serialRadio.disabled = true;
+            if (serialLabel) serialLabel.title = 'Web Serial not available in this browser';
+        }
+
+        // Auto-select the available mode
+        if (!hasSerial && hasBluetooth && bleRadio) {
+            bleRadio.checked = true;
+        } else if (hasSerial && serialRadio) {
+            serialRadio.checked = true;  // Serial is preferred (more reliable)
+        }
+
+        // Initialize state
+        this.niimbotClient = null;
+        this.printerConnected = false;
+        this.isPrinting = false;
+
+        // Load saved settings (including connection mode)
+        this.loadPrinterSettings();
+
+        // Event listeners
+        const connectBtn = document.getElementById('printer-connect');
+        const disconnectBtn = document.getElementById('printer-disconnect');
+        const printBtn = document.getElementById('printer-print');
+        const densitySlider = document.getElementById('printer-density');
+        const modelSelect = document.getElementById('printer-model');
+        const quantityInput = document.getElementById('printer-quantity');
+
+        if (connectBtn) connectBtn.addEventListener('click', () => this.connectPrinter());
+        if (disconnectBtn) disconnectBtn.addEventListener('click', () => this.disconnectPrinter());
+        if (printBtn) printBtn.addEventListener('click', () => this.printLabel());
+
+        if (densitySlider) {
+            densitySlider.addEventListener('input', (e) => {
+                document.getElementById('density-value').textContent = e.target.value;
+                this.savePrinterSettings();
+            });
+        }
+
+        if (modelSelect) {
+            modelSelect.addEventListener('change', () => this.savePrinterSettings());
+        }
+
+        if (quantityInput) {
+            quantityInput.addEventListener('change', () => this.savePrinterSettings());
+        }
+
+        // Save connection mode on toggle
+        document.querySelectorAll('input[name="conn-mode"]').forEach(radio => {
+            radio.addEventListener('change', () => this.savePrinterSettings());
+        });
+
+        console.log(`[Printer] Initialized (BLE: ${hasBluetooth}, Serial: ${hasSerial})`);
+    }
+
+    async connectPrinter() {
+        const connectBtn = document.getElementById('printer-connect');
+        const statusBadge = document.getElementById('printer-status-badge');
+        const mode = this.getConnectionMode();
+
+        try {
+            connectBtn.disabled = true;
+            connectBtn.textContent = '\u{1F50D} Searching...';
+            statusBadge.className = 'badge bg-warning text-dark';
+            statusBadge.textContent = 'Connecting...';
+
+            const modeLabel = mode === 'serial' ? 'USB serial port' : 'Bluetooth device';
+            this.showPrinterMessage(`Select your ${modeLabel} from the picker...`, 'muted');
+
+            // Create the appropriate client based on selected mode
+            if (mode === 'serial') {
+                console.log('[Printer] Creating Serial client');
+                this.niimbotClient = new niimbluelib.NiimbotSerialClient();
+            } else {
+                console.log('[Printer] Creating Bluetooth client');
+                this.niimbotClient = new niimbluelib.NiimbotBluetoothClient();
+            }
+
+            // Set up event handlers (same for both modes)
+            this.niimbotClient.on('connect', () => {
+                console.log(`[Printer] Connected via ${mode}`);
+                this.printerConnected = true;
+                this.updatePrinterUI(true);
+                this.showPrinterMessage(`Connected via ${mode === 'serial' ? 'USB' : 'Bluetooth'}!`, 'success');
+                this.fetchPrinterInfo();
+            });
+
+            this.niimbotClient.on('disconnect', () => {
+                console.log('[Printer] Disconnected');
+                this.printerConnected = false;
+                this.isPrinting = false;
+                this.updatePrinterUI(false);
+                this.showPrinterMessage('Printer disconnected', 'muted');
+            });
+
+            this.niimbotClient.on('printprogress', (e) => {
+                this.updatePrintProgress(e);
+            });
+
+            // Initiate connection (triggers browser picker — serial port or BLE device)
+            await this.niimbotClient.connect();
+
+            // macOS USB CDC driver needs longer packet intervals to avoid port saturation.
+            // Default is 10ms which causes "Port is not readable/writable" on macOS.
+            if (mode === 'serial' && this.niimbotClient.setPacketInterval) {
+                this.niimbotClient.setPacketInterval(50);
+                console.log('[Printer] Set packet interval to 50ms (macOS USB workaround)');
+            }
+
+        } catch (error) {
+            console.error('[Printer] Connection failed:', error);
+            this.printerConnected = false;
+            this.niimbotClient = null;
+            this.updatePrinterUI(false);
+
+            if (error.name === 'NotFoundError') {
+                this.showPrinterMessage('No device selected. Click Connect to try again.', 'muted');
+            } else if (error.message?.includes('No port selected')) {
+                this.showPrinterMessage('No serial port selected. Click Connect to try again.', 'muted');
+            } else {
+                this.showPrinterMessage(`Connection failed: ${error.message}`, 'danger');
+            }
+        }
+    }
+
+    async disconnectPrinter() {
+        try {
+            if (this.niimbotClient) {
+                this.niimbotClient.disconnect();
+                this.niimbotClient = null;
+            }
+        } catch (error) {
+            console.error('[Printer] Disconnect error:', error);
+        }
+        this.printerConnected = false;
+        this.isPrinting = false;
+        this.updatePrinterUI(false);
+    }
+
+    async fetchPrinterInfo() {
+        if (!this.niimbotClient) return;
+
+        try {
+            // fetchPrinterInfo() sends info-request packets to the printer,
+            // stores the results, and returns the PrinterInfo object
+            const info = await this.niimbotClient.fetchPrinterInfo();
+            const batteryEl = document.getElementById('printer-battery');
+            const modelEl = document.getElementById('printer-model-info');
+            const infoRow = document.getElementById('printer-info');
+
+            if (info && infoRow) {
+                infoRow.style.display = 'flex';
+
+                if (info.charge !== undefined && batteryEl) {
+                    batteryEl.textContent = `\u{1F50B} ${info.charge}%`;
+                }
+
+                if (info.softwareVersion && modelEl) {
+                    modelEl.textContent = `\u{1F4F1} FW: ${info.softwareVersion}`;
+                }
+            }
+        } catch (error) {
+            console.warn('[Printer] Could not fetch printer info:', error);
+        }
+    }
+
+    /**
+     * Render the current label to a canvas at the printer's native 203 DPI.
+     * This reuses the downloadPNG rendering logic but forces:
+     * - DPI: 203 (Niimbot native)
+     * - White background (thermal printers need explicit white, no transparency)
+     * - No rotation (the ImageEncoder handles print direction)
+     */
+    async renderForPrinter() {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+
+        const height = parseInt(document.getElementById('label-height').value);
+        const width = parseInt(document.getElementById('label-width').value);
+        const mainTextInputs = document.querySelectorAll('.main-text-input');
+        const mainTexts = Array.from(mainTextInputs).map(input => input.value.trim()).filter(text => text);
+        const subTextInputs = document.querySelectorAll('.sub-text-input');
+        const subTexts = Array.from(subTextInputs).map(input => input.value.trim()).filter(text => text);
+        const iconSelect = document.getElementById('icon-select').value;
+
+        const dpi = 203; // Niimbot native resolution
+        const mmToPx = dpi / 25.4;
+
+        canvas.width = Math.round(width * mmToPx);
+        canvas.height = Math.round(height * mmToPx);
+
+        // White background (required for thermal printing — no transparency)
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Draw icon
+        const iconSize = (height - 2) * mmToPx;
+        const iconX = 1 * mmToPx;
+        const iconY = 1 * mmToPx;
+        await this.drawIcon(ctx, iconX, iconY, iconSize, iconSelect);
+
+        // Draw text
+        const textX = iconX + iconSize + (2 * mmToPx);
+        const textAreaWidth = canvas.width - textX - (1 * mmToPx);
+
+        ctx.fillStyle = 'black';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+
+        const mainFontSize = this.calculateFontSize(height);
+        const subFontSize = mainFontSize * 0.75;
+
+        // Main text
+        ctx.font = `bold ${mainFontSize * mmToPx}px Arial`;
+        const textY = subTexts.length > 0 ? iconY + (iconSize * 0.2) : iconY + (iconSize * 0.4);
+
+        if (mainTexts.length === 0) {
+            const defaultTexts = ['M3', 'M3', 'M3'];
+            const columnWidth = textAreaWidth / defaultTexts.length;
+            defaultTexts.forEach((text, index) => {
+                ctx.fillText(text, textX + (index * columnWidth), textY);
+            });
+        } else {
+            const columnWidth = textAreaWidth / mainTexts.length;
+            mainTexts.forEach((text, index) => {
+                ctx.fillText(text, textX + (index * columnWidth), textY);
+            });
+        }
+
+        // Sub text
+        ctx.font = `${subFontSize * mmToPx}px Arial`;
+        ctx.fillStyle = '#666';
+        const subTextY = textY + (mainFontSize * mmToPx * 1.2);
+
+        if (subTexts.length === 0) {
+            const defaultSubTexts = ['8 mm', '10 mm', '12 mm'];
+            const columnWidth = textAreaWidth / defaultSubTexts.length;
+            defaultSubTexts.forEach((text, index) => {
+                ctx.fillText(text, textX + (index * columnWidth), subTextY);
+            });
+        } else {
+            const columnWidth = textAreaWidth / subTexts.length;
+            subTexts.forEach((text, index) => {
+                ctx.fillText(text, textX + (index * columnWidth), subTextY);
+            });
+        }
+
+        return canvas;
+    }
+
+    /**
+     * Render the label at exact pixel dimensions for the printer.
+     * Unlike renderForPrinter() which uses DPI-based conversion,
+     * this renders directly to the pixel grid the printer expects.
+     * @param {number} widthPx - canvas width in pixels
+     * @param {number} heightPx - canvas height in pixels (must match printheadPixels for 'left' direction)
+     */
+    async renderForPrinterNative(widthPx, heightPx) {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+
+        const mainTextInputs = document.querySelectorAll('.main-text-input');
+        const mainTexts = Array.from(mainTextInputs).map(input => input.value.trim()).filter(text => text);
+        const subTextInputs = document.querySelectorAll('.sub-text-input');
+        const subTexts = Array.from(subTextInputs).map(input => input.value.trim()).filter(text => text);
+        const iconSelect = document.getElementById('icon-select').value;
+
+        canvas.width = widthPx;
+        canvas.height = heightPx;
+
+        // pxPerUnit: treat the canvas as a unit grid (height = 1.0)
+        // All layout is proportional to the height
+        const pxPerUnit = heightPx;
+
+        // White background (required for thermal printing — no transparency)
+        ctx.fillStyle = 'white';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Draw icon (square, with margin)
+        const margin = Math.round(pxPerUnit * 0.06);
+        const iconSize = heightPx - (2 * margin);
+        const iconX = margin;
+        const iconY = margin;
+        await this.drawIcon(ctx, iconX, iconY, iconSize, iconSelect);
+
+        // Draw text
+        const textX = iconX + iconSize + Math.round(pxPerUnit * 0.12);
+        const textAreaWidth = canvas.width - textX - margin;
+
+        ctx.fillStyle = 'black';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+
+        // Font sizes proportional to canvas height
+        const mainFontSize = Math.round(heightPx * 0.35);
+        const subFontSize = Math.round(mainFontSize * 0.7);
+
+        // Main text
+        ctx.font = `bold ${mainFontSize}px Arial`;
+        const textY = subTexts.length > 0 ? iconY + Math.round(iconSize * 0.1) : iconY + Math.round(iconSize * 0.3);
+
+        if (mainTexts.length === 0) {
+            const defaultTexts = ['M3', 'M3', 'M3'];
+            const columnWidth = textAreaWidth / defaultTexts.length;
+            defaultTexts.forEach((text, index) => {
+                ctx.fillText(text, textX + (index * columnWidth), textY);
+            });
+        } else {
+            const columnWidth = textAreaWidth / mainTexts.length;
+            mainTexts.forEach((text, index) => {
+                ctx.fillText(text, textX + (index * columnWidth), textY);
+            });
+        }
+
+        // Sub text
+        ctx.font = `${subFontSize}px Arial`;
+        ctx.fillStyle = 'black';
+        const subTextY = textY + Math.round(mainFontSize * 1.15);
+
+        if (subTexts.length === 0) {
+            const defaultSubTexts = ['8 mm', '10 mm', '12 mm'];
+            const columnWidth = textAreaWidth / defaultSubTexts.length;
+            defaultSubTexts.forEach((text, index) => {
+                ctx.fillText(text, textX + (index * columnWidth), subTextY);
+            });
+        } else {
+            const columnWidth = textAreaWidth / subTexts.length;
+            subTexts.forEach((text, index) => {
+                ctx.fillText(text, textX + (index * columnWidth), subTextY);
+            });
+        }
+
+        // *** Post-process: threshold to pure 1-bit black/white ***
+        // Thermal printers can only print black or white.
+        // Anti-aliased text and gray pixels must be forced to one or the other.
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imageData.data;
+        const thresholdVal = 140; // Match NiimBlue's default threshold
+        for (let i = 0; i < data.length; i += 4) {
+            // Convert to grayscale luminance
+            const gray = (data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114);
+            const bw = gray < thresholdVal ? 0 : 255;
+            data[i] = bw;     // R
+            data[i+1] = bw;   // G
+            data[i+2] = bw;   // B
+            // Alpha stays 255
+        }
+        ctx.putImageData(imageData, 0, 0);
+
+        return canvas;
+    }
+
+    async printLabel() {
+        if (!this.printerConnected || !this.niimbotClient) {
+            this.showPrinterMessage('No printer connected. Click Connect first.', 'danger');
+            return;
+        }
+
+        if (this.isPrinting) {
+            this.showPrinterMessage('Print already in progress...', 'muted');
+            return;
+        }
+
+        const printBtn = document.getElementById('printer-print');
+        const progressContainer = document.getElementById('printer-progress-container');
+        const progressBar = document.getElementById('printer-progress-bar');
+
+        let printTask;
+        try {
+            this.isPrinting = true;
+            printBtn.disabled = true;
+            printBtn.textContent = '\u{23F3} Printing...';
+            progressContainer.style.display = 'block';
+            this.setProgress(0);
+            this.showPrinterMessage('Rendering label...', 'muted');
+
+            // 1. Render canvas at printer's native printhead resolution
+            //    The ImageEncoder rotates the image based on printDirection:
+            //    - "left": cols = canvas.height, rows = canvas.width
+            //    - "top":  cols = canvas.width,  rows = canvas.height
+            //    The column count MUST equal the printer's printheadPixels.
+            //    Also: cols must be a multiple of 8.
+            const meta = this.niimbotClient.getModelMetadata();
+            const printDirection = meta?.printDirection || 'left';
+            const printheadPixels = meta?.printheadPixels || 96;
+
+            // Read physical label dimensions from the UI (mm)
+            const labelWidthMm = parseInt(document.getElementById('label-width').value);
+            const labelHeightMm = parseInt(document.getElementById('label-height').value);
+
+            // Calculate canvas dimensions so column axis = printheadPixels
+            // For "left": cols = canvas.height → height must be printheadPixels
+            //             rows = canvas.width  → width from DPI (feed direction at 203 DPI)
+            // For "top":  cols = canvas.width  → width must be printheadPixels
+            //             rows = canvas.height → height from DPI (feed direction at 203 DPI)
+            const dpi = meta?.dpi || 203;
+            const mmToPx = dpi / 25.4;
+            let canvasW, canvasH;
+            if (printDirection === 'left') {
+                canvasH = printheadPixels; // cols = printhead width
+                canvasW = Math.round(labelWidthMm * mmToPx); // rows = label length at native DPI
+            } else {
+                canvasW = printheadPixels; // cols = printhead width
+                canvasH = Math.round(labelHeightMm * mmToPx); // rows = label length at native DPI
+            }
+
+            console.log(`[Printer] Model meta: direction=${printDirection}, printheadPixels=${printheadPixels}`);
+            console.log(`[Printer] Label: ${labelWidthMm}×${labelHeightMm}mm → canvas: ${canvasW}×${canvasH}px`);
+
+            // Render label directly at native printer resolution
+            const canvas = await this.renderForPrinterNative(canvasW, canvasH);
+
+            console.log(`[Printer] Rendered canvas: ${canvas.width}×${canvas.height} (cols will be ${printDirection === 'left' ? canvas.height : canvas.width})`);
+            this.showPrinterMessage('Encoding image...', 'muted');
+
+            // 2. Encode the canvas for the printer
+            const encoded = niimbluelib.ImageEncoder.encodeCanvas(canvas, printDirection);
+
+            // 4. Get print settings from UI
+            const model = document.getElementById('printer-model').value;
+            const density = parseInt(document.getElementById('printer-density').value);
+            const quantity = parseInt(document.getElementById('printer-quantity').value) || 1;
+
+            // 5. Determine the print task type for the connected printer
+            //    The client auto-detects the correct task based on model + protocol version.
+            const printerInfo = this.niimbotClient.getPrinterInfo();
+            const taskType = this.niimbotClient.getPrintTaskType() || model;
+
+            // Clamp density to model's supported range
+            const densityMin = meta?.densityMin ?? 1;
+            const densityMax = meta?.densityMax ?? 5;
+            const clampedDensity = Math.max(densityMin, Math.min(densityMax, density));
+
+            // Get the label type the printer reported (falls back to WithGaps = 1)
+            const labelType = printerInfo.labelType ?? 1;
+
+            console.log(`[Printer] Protocol version: ${printerInfo.protocolVersion}`);
+            console.log(`[Printer] Model ID: ${printerInfo.modelId} → task type: ${taskType}`);
+            console.log(`[Printer] Label type: ${labelType}, density: ${clampedDensity} (range ${densityMin}-${densityMax})`);
+            console.log(`[Printer] Encoded image: ${encoded.cols} cols × ${encoded.rows} rows, ${encoded.rowsData.length} data chunks`);
+
+            this.showPrinterMessage(`Printing (task=${taskType}, density=${clampedDensity})...`, 'muted');
+
+            // *** CRITICAL: Stop heartbeat before printing (prevents packet collisions) ***
+            // NiimBlue's canonical flow: stopHeartbeat → print → startHeartbeat
+            this.niimbotClient.stopHeartbeat();
+
+            printTask = this.niimbotClient.abstraction.newPrintTask(taskType, {
+                totalPages: quantity,
+                density: clampedDensity,
+                speed: 1,
+                labelType: labelType,
+                statusPollIntervalMs: 100,
+                statusTimeoutMs: 8_000,
+            });
+
+            // 6. Execute print sequence (matching NiimBlue's exact flow)
+            await printTask.printInit();
+            this.setProgress(10);
+            this.showPrinterMessage('Print initialized, sending image...', 'muted');
+
+            await printTask.printPage(encoded, quantity);
+            this.setProgress(50);
+            this.showPrinterMessage('Image sent, printing...', 'muted');
+
+            // Listen for print progress events
+            const progressListener = (e) => {
+                const pct = Math.floor((e.page / quantity) * ((e.pagePrintProgress + e.pageFeedProgress) / 2));
+                this.setProgress(50 + (pct * 0.4));
+            };
+            this.niimbotClient.on('printprogress', progressListener);
+
+            await printTask.waitForFinished();
+            this.niimbotClient.off('printprogress', progressListener);
+            this.setProgress(90);
+
+        } catch (error) {
+            console.error('[Printer] Print failed:', error);
+            this.showPrinterMessage(`Print failed: ${error.message}`, 'danger');
+            this._printFailed = true;
+        } finally {
+            // Always call printEnd on the TASK (not the raw abstraction) for proper cleanup
+            try {
+                if (printTask) {
+                    await printTask.printEnd();
+                } else if (this.niimbotClient?.abstraction) {
+                    console.warn('[Printer] Print task undefined, falling back to abstraction.printEnd()');
+                    await this.niimbotClient.abstraction.printEnd();
+                }
+            } catch (cleanupError) {
+                console.warn('[Printer] Cleanup failed:', cleanupError);
+            }
+
+            // *** CRITICAL: Restart heartbeat after printing ***
+            try {
+                this.niimbotClient.startHeartbeat();
+            } catch (_) {}
+
+            if (!this._printFailed) {
+                this.setProgress(100);
+                const qty = document.getElementById('printer-quantity')?.value || 1;
+                this.showPrinterMessage(`\u{2705} Print complete! (${qty} label(s))`, 'success');
+            }
+            delete this._printFailed;
+
+            // Hide progress bar after a delay
+            setTimeout(() => {
+                const pc = document.getElementById('printer-progress-container');
+                if (pc) pc.style.display = 'none';
+                this.setProgress(0);
+            }, 3000);
+
+            this.isPrinting = false;
+            printBtn.disabled = !this.printerConnected;
+            printBtn.textContent = '\u{1F5A8}\uFE0F Print Label';
+        }
+    }
+
+    updatePrintProgress(e) {
+        if (!e) return;
+        // Calculate overall progress (10-90% range, leaving room for init/end)
+        let progress = 10;
+        if (e.pagePrintProgress !== undefined) {
+            progress = 10 + (e.pagePrintProgress * 0.7);
+        }
+        if (e.pageFeedProgress !== undefined) {
+            progress = Math.max(progress, 80 + (e.pageFeedProgress * 0.1));
+        }
+        this.setProgress(Math.min(90, Math.round(progress)));
+    }
+
+    setProgress(percent) {
+        const bar = document.getElementById('printer-progress-bar');
+        if (bar) {
+            bar.style.width = `${percent}%`;
+            bar.textContent = `${percent}%`;
+            bar.setAttribute('aria-valuenow', percent);
+        }
+    }
+
+    updatePrinterUI(connected) {
+        const connectBtn = document.getElementById('printer-connect');
+        const disconnectBtn = document.getElementById('printer-disconnect');
+        const printBtn = document.getElementById('printer-print');
+        const statusBadge = document.getElementById('printer-status-badge');
+        const infoRow = document.getElementById('printer-info');
+
+        if (connected) {
+            connectBtn.style.display = 'none';
+            disconnectBtn.style.display = 'inline-block';
+            printBtn.disabled = false;
+            statusBadge.className = 'badge bg-success';
+            statusBadge.textContent = 'Connected';
+        } else {
+            connectBtn.style.display = 'inline-block';
+            connectBtn.disabled = false;
+            connectBtn.textContent = '\u{1F517} Connect Printer';
+            disconnectBtn.style.display = 'none';
+            printBtn.disabled = true;
+            statusBadge.className = 'badge bg-secondary';
+            statusBadge.textContent = 'Disconnected';
+            if (infoRow) infoRow.style.display = 'none';
+        }
+    }
+
+    showPrinterMessage(text, type = 'muted') {
+        const msg = document.getElementById('printer-message');
+        if (!msg) return;
+        msg.style.display = 'block';
+        msg.className = `mt-2 small text-${type}`;
+        msg.textContent = text;
+
+        // Auto-hide success/info messages after 5 seconds
+        if (type === 'success') {
+            setTimeout(() => {
+                if (msg.textContent === text) {
+                    msg.style.display = 'none';
+                }
+            }, 5000);
+        }
+    }
+
+    loadPrinterSettings() {
+        try {
+            const saved = JSON.parse(localStorage.getItem('printerSettings') || '{}');
+            if (saved.model) {
+                const modelSelect = document.getElementById('printer-model');
+                if (modelSelect) modelSelect.value = saved.model;
+            }
+            if (saved.density) {
+                const densitySlider = document.getElementById('printer-density');
+                const densityValue = document.getElementById('density-value');
+                if (densitySlider) densitySlider.value = saved.density;
+                if (densityValue) densityValue.textContent = saved.density;
+            }
+            if (saved.quantity) {
+                const quantityInput = document.getElementById('printer-quantity');
+                if (quantityInput) quantityInput.value = saved.quantity;
+            }
+            if (saved.connectionMode) {
+                const radio = document.getElementById(
+                    saved.connectionMode === 'bluetooth' ? 'conn-mode-ble' : 'conn-mode-serial'
+                );
+                if (radio && !radio.disabled) radio.checked = true;
+            }
+        } catch (error) {
+            console.warn('[Printer] Could not load settings:', error);
+        }
+    }
+
+    savePrinterSettings() {
+        try {
+            const settings = {
+                model: document.getElementById('printer-model')?.value || 'D110',
+                density: document.getElementById('printer-density')?.value || '3',
+                quantity: document.getElementById('printer-quantity')?.value || '1',
+                connectionMode: this.getConnectionMode(),
+            };
+            localStorage.setItem('printerSettings', JSON.stringify(settings));
+        } catch (error) {
+            console.warn('[Printer] Could not save settings:', error);
         }
     }
 }

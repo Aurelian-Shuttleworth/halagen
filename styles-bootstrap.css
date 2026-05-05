@@ -822,6 +822,52 @@ footer {
     padding-left: 0 !important;
 }
 
+/* Bluetooth Printer Section */
+.printer-section .card {
+    border-color: #dee2e6;
+}
+
+.printer-section .card-header {
+    background-color: #f8f9fa;
+    font-size: 14px;
+    font-weight: 600;
+    color: #495057;
+    padding: 10px 16px;
+}
+
+.printer-section .card-body {
+    padding: 16px;
+}
+
+.printer-section .form-label-sm {
+    font-size: 11px;
+    font-weight: 600;
+    color: #6c757d;
+    margin-bottom: 4px;
+}
+
+.printer-section .form-range {
+    flex: 1;
+}
+
+#printer-message {
+    font-size: 12px;
+    padding: 4px 0;
+}
+
+#printer-message.text-danger {
+    color: #dc3545 !important;
+}
+
+#printer-message.text-success {
+    color: #198754 !important;
+}
+
+.printer-section .badge {
+    font-size: 11px;
+    font-weight: 500;
+}
+
 /* Responsive adjustments */
 @media (max-width: 768px) {
     .container-fluid {
