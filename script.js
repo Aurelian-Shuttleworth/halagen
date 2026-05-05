@@ -2099,7 +2099,7 @@ labels:
             radio.addEventListener('change', () => this.savePrinterSettings());
         });
 
-        console.log(`[Printer] Initialized (BLE: ${hasBluetooth}, Serial: ${hasSerial})`);
+
     }
 
     async connectPrinter() {
@@ -2116,18 +2116,11 @@ labels:
             const modeLabel = mode === 'serial' ? 'USB serial port' : 'Bluetooth device';
             this.showPrinterMessage(`Select your ${modeLabel} from the picker...`, 'muted');
 
-            // Create the appropriate client based on selected mode
-            if (mode === 'serial') {
-                console.log('[Printer] Creating Serial client');
-                this.niimbotClient = new niimbluelib.NiimbotSerialClient();
-            } else {
-                console.log('[Printer] Creating Bluetooth client');
-                this.niimbotClient = new niimbluelib.NiimbotBluetoothClient();
-            }
+            this.niimbotClient = mode === 'serial'
+                ? new niimbluelib.NiimbotSerialClient()
+                : new niimbluelib.NiimbotBluetoothClient();
 
-            // Set up event handlers (same for both modes)
             this.niimbotClient.on('connect', () => {
-                console.log(`[Printer] Connected via ${mode}`);
                 this.printerConnected = true;
                 this.updatePrinterUI(true);
                 this.showPrinterMessage(`Connected via ${mode === 'serial' ? 'USB' : 'Bluetooth'}!`, 'success');
@@ -2135,7 +2128,6 @@ labels:
             });
 
             this.niimbotClient.on('disconnect', () => {
-                console.log('[Printer] Disconnected');
                 this.printerConnected = false;
                 this.isPrinting = false;
                 this.updatePrinterUI(false);
@@ -2146,14 +2138,11 @@ labels:
                 this.updatePrintProgress(e);
             });
 
-            // Initiate connection (triggers browser picker — serial port or BLE device)
             await this.niimbotClient.connect();
 
-            // macOS USB CDC driver needs longer packet intervals to avoid port saturation.
-            // Default is 10ms which causes "Port is not readable/writable" on macOS.
+            // macOS USB CDC needs longer packet intervals (default 10ms saturates the port)
             if (mode === 'serial' && this.niimbotClient.setPacketInterval) {
                 this.niimbotClient.setPacketInterval(50);
-                console.log('[Printer] Set packet interval to 50ms (macOS USB workaround)');
             }
 
         } catch (error) {
@@ -2213,96 +2202,11 @@ labels:
         }
     }
 
-    /**
-     * Render the current label to a canvas at the printer's native 203 DPI.
-     * This reuses the downloadPNG rendering logic but forces:
-     * - DPI: 203 (Niimbot native)
-     * - White background (thermal printers need explicit white, no transparency)
-     * - No rotation (the ImageEncoder handles print direction)
-     */
-    async renderForPrinter() {
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
 
-        const height = parseInt(document.getElementById('label-height').value);
-        const width = parseInt(document.getElementById('label-width').value);
-        const mainTextInputs = document.querySelectorAll('.main-text-input');
-        const mainTexts = Array.from(mainTextInputs).map(input => input.value.trim()).filter(text => text);
-        const subTextInputs = document.querySelectorAll('.sub-text-input');
-        const subTexts = Array.from(subTextInputs).map(input => input.value.trim()).filter(text => text);
-        const iconSelect = document.getElementById('icon-select').value;
-
-        const dpi = 203; // Niimbot native resolution
-        const mmToPx = dpi / 25.4;
-
-        canvas.width = Math.round(width * mmToPx);
-        canvas.height = Math.round(height * mmToPx);
-
-        // White background (required for thermal printing — no transparency)
-        ctx.fillStyle = 'white';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-        // Draw icon
-        const iconSize = (height - 2) * mmToPx;
-        const iconX = 1 * mmToPx;
-        const iconY = 1 * mmToPx;
-        await this.drawIcon(ctx, iconX, iconY, iconSize, iconSelect);
-
-        // Draw text
-        const textX = iconX + iconSize + (2 * mmToPx);
-        const textAreaWidth = canvas.width - textX - (1 * mmToPx);
-
-        ctx.fillStyle = 'black';
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'top';
-
-        const mainFontSize = this.calculateFontSize(height);
-        const subFontSize = mainFontSize * 0.75;
-
-        // Main text
-        ctx.font = `bold ${mainFontSize * mmToPx}px Arial`;
-        const textY = subTexts.length > 0 ? iconY + (iconSize * 0.2) : iconY + (iconSize * 0.4);
-
-        if (mainTexts.length === 0) {
-            const defaultTexts = ['M3', 'M3', 'M3'];
-            const columnWidth = textAreaWidth / defaultTexts.length;
-            defaultTexts.forEach((text, index) => {
-                ctx.fillText(text, textX + (index * columnWidth), textY);
-            });
-        } else {
-            const columnWidth = textAreaWidth / mainTexts.length;
-            mainTexts.forEach((text, index) => {
-                ctx.fillText(text, textX + (index * columnWidth), textY);
-            });
-        }
-
-        // Sub text
-        ctx.font = `${subFontSize * mmToPx}px Arial`;
-        ctx.fillStyle = '#666';
-        const subTextY = textY + (mainFontSize * mmToPx * 1.2);
-
-        if (subTexts.length === 0) {
-            const defaultSubTexts = ['8 mm', '10 mm', '12 mm'];
-            const columnWidth = textAreaWidth / defaultSubTexts.length;
-            defaultSubTexts.forEach((text, index) => {
-                ctx.fillText(text, textX + (index * columnWidth), subTextY);
-            });
-        } else {
-            const columnWidth = textAreaWidth / subTexts.length;
-            subTexts.forEach((text, index) => {
-                ctx.fillText(text, textX + (index * columnWidth), subTextY);
-            });
-        }
-
-        return canvas;
-    }
 
     /**
      * Render the label at exact pixel dimensions for the printer.
-     * Unlike renderForPrinter() which uses DPI-based conversion,
-     * this renders directly to the pixel grid the printer expects.
-     * @param {number} widthPx - canvas width in pixels
-     * @param {number} heightPx - canvas height in pixels (must match printheadPixels for 'left' direction)
+     * Renders directly to the pixel grid, then thresholds to 1-bit B/W for thermal printing.
      */
     async renderForPrinterNative(widthPx, heightPx) {
         const canvas = document.createElement('canvas');
@@ -2379,20 +2283,14 @@ labels:
             });
         }
 
-        // *** Post-process: threshold to pure 1-bit black/white ***
-        // Thermal printers can only print black or white.
-        // Anti-aliased text and gray pixels must be forced to one or the other.
+        // Threshold to 1-bit black/white for thermal printing
         const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         const data = imageData.data;
-        const thresholdVal = 140; // Match NiimBlue's default threshold
+        const thresholdVal = 140;
         for (let i = 0; i < data.length; i += 4) {
-            // Convert to grayscale luminance
-            const gray = (data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114);
+            const gray = data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114;
             const bw = gray < thresholdVal ? 0 : 255;
-            data[i] = bw;     // R
-            data[i+1] = bw;   // G
-            data[i+2] = bw;   // B
-            // Alpha stays 255
+            data[i] = data[i+1] = data[i+2] = bw;
         }
         ctx.putImageData(imageData, 0, 0);
 
@@ -2423,75 +2321,47 @@ labels:
             this.setProgress(0);
             this.showPrinterMessage('Rendering label...', 'muted');
 
-            // 1. Render canvas at printer's native printhead resolution
-            //    The ImageEncoder rotates the image based on printDirection:
-            //    - "left": cols = canvas.height, rows = canvas.width
-            //    - "top":  cols = canvas.width,  rows = canvas.height
-            //    The column count MUST equal the printer's printheadPixels.
-            //    Also: cols must be a multiple of 8.
             const meta = this.niimbotClient.getModelMetadata();
             const printDirection = meta?.printDirection || 'left';
             const printheadPixels = meta?.printheadPixels || 96;
-
-            // Read physical label dimensions from the UI (mm)
             const labelWidthMm = parseInt(document.getElementById('label-width').value);
             const labelHeightMm = parseInt(document.getElementById('label-height').value);
-
-            // Calculate canvas dimensions so column axis = printheadPixels
-            // For "left": cols = canvas.height → height must be printheadPixels
-            //             rows = canvas.width  → width from DPI (feed direction at 203 DPI)
-            // For "top":  cols = canvas.width  → width must be printheadPixels
-            //             rows = canvas.height → height from DPI (feed direction at 203 DPI)
             const dpi = meta?.dpi || 203;
             const mmToPx = dpi / 25.4;
+
+            // Column axis must equal printheadPixels
             let canvasW, canvasH;
             if (printDirection === 'left') {
-                canvasH = printheadPixels; // cols = printhead width
-                canvasW = Math.round(labelWidthMm * mmToPx); // rows = label length at native DPI
+                canvasH = printheadPixels;
+                canvasW = Math.round(labelWidthMm * mmToPx);
             } else {
-                canvasW = printheadPixels; // cols = printhead width
-                canvasH = Math.round(labelHeightMm * mmToPx); // rows = label length at native DPI
+                canvasW = printheadPixels;
+                canvasH = Math.round(labelHeightMm * mmToPx);
             }
 
-            console.log(`[Printer] Model meta: direction=${printDirection}, printheadPixels=${printheadPixels}`);
-            console.log(`[Printer] Label: ${labelWidthMm}×${labelHeightMm}mm → canvas: ${canvasW}×${canvasH}px`);
 
-            // Render label directly at native printer resolution
+
             const canvas = await this.renderForPrinterNative(canvasW, canvasH);
 
-            console.log(`[Printer] Rendered canvas: ${canvas.width}×${canvas.height} (cols will be ${printDirection === 'left' ? canvas.height : canvas.width})`);
-            this.showPrinterMessage('Encoding image...', 'muted');
-
-            // 2. Encode the canvas for the printer
             const encoded = niimbluelib.ImageEncoder.encodeCanvas(canvas, printDirection);
 
-            // 4. Get print settings from UI
             const model = document.getElementById('printer-model').value;
             const density = parseInt(document.getElementById('printer-density').value);
             const quantity = parseInt(document.getElementById('printer-quantity').value) || 1;
 
-            // 5. Determine the print task type for the connected printer
-            //    The client auto-detects the correct task based on model + protocol version.
             const printerInfo = this.niimbotClient.getPrinterInfo();
             const taskType = this.niimbotClient.getPrintTaskType() || model;
 
-            // Clamp density to model's supported range
-            const densityMin = meta?.densityMin ?? 1;
-            const densityMax = meta?.densityMax ?? 5;
-            const clampedDensity = Math.max(densityMin, Math.min(densityMax, density));
+            const clampedDensity = Math.max(
+                meta?.densityMin ?? 1,
+                Math.min(meta?.densityMax ?? 5, density)
+            );
 
-            // Get the label type the printer reported (falls back to WithGaps = 1)
             const labelType = printerInfo.labelType ?? 1;
 
-            console.log(`[Printer] Protocol version: ${printerInfo.protocolVersion}`);
-            console.log(`[Printer] Model ID: ${printerInfo.modelId} → task type: ${taskType}`);
-            console.log(`[Printer] Label type: ${labelType}, density: ${clampedDensity} (range ${densityMin}-${densityMax})`);
-            console.log(`[Printer] Encoded image: ${encoded.cols} cols × ${encoded.rows} rows, ${encoded.rowsData.length} data chunks`);
+            this.showPrinterMessage('Printing...', 'muted');
 
-            this.showPrinterMessage(`Printing (task=${taskType}, density=${clampedDensity})...`, 'muted');
-
-            // *** CRITICAL: Stop heartbeat before printing (prevents packet collisions) ***
-            // NiimBlue's canonical flow: stopHeartbeat → print → startHeartbeat
+            // Stop heartbeat to prevent packet collisions during print
             this.niimbotClient.stopHeartbeat();
 
             printTask = this.niimbotClient.abstraction.newPrintTask(taskType, {
@@ -2503,16 +2373,12 @@ labels:
                 statusTimeoutMs: 8_000,
             });
 
-            // 6. Execute print sequence (matching NiimBlue's exact flow)
             await printTask.printInit();
             this.setProgress(10);
-            this.showPrinterMessage('Print initialized, sending image...', 'muted');
 
             await printTask.printPage(encoded, quantity);
             this.setProgress(50);
-            this.showPrinterMessage('Image sent, printing...', 'muted');
 
-            // Listen for print progress events
             const progressListener = (e) => {
                 const pct = Math.floor((e.page / quantity) * ((e.pagePrintProgress + e.pageFeedProgress) / 2));
                 this.setProgress(50 + (pct * 0.4));
@@ -2528,22 +2394,15 @@ labels:
             this.showPrinterMessage(`Print failed: ${error.message}`, 'danger');
             this._printFailed = true;
         } finally {
-            // Always call printEnd on the TASK (not the raw abstraction) for proper cleanup
             try {
                 if (printTask) {
                     await printTask.printEnd();
                 } else if (this.niimbotClient?.abstraction) {
-                    console.warn('[Printer] Print task undefined, falling back to abstraction.printEnd()');
                     await this.niimbotClient.abstraction.printEnd();
                 }
-            } catch (cleanupError) {
-                console.warn('[Printer] Cleanup failed:', cleanupError);
-            }
-
-            // *** CRITICAL: Restart heartbeat after printing ***
-            try {
-                this.niimbotClient.startHeartbeat();
             } catch (_) {}
+
+            try { this.niimbotClient.startHeartbeat(); } catch (_) {}
 
             if (!this._printFailed) {
                 this.setProgress(100);
