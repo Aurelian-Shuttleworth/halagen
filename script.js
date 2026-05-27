@@ -490,144 +490,103 @@ labels:
         });
     }
 
+    /**
+     * Build a LabelDescriptor from the current UI state.
+     */
+    buildDescriptor() {
+        return {
+            width_mm: parseInt(document.getElementById('label-width').value),
+            height_mm: parseInt(document.getElementById('label-height').value),
+            iconKey: document.getElementById('icon-select').value,
+            mainTexts: Array.from(document.querySelectorAll('.main-text-input'))
+                            .map(i => i.value.trim()).filter(Boolean),
+            subTexts: Array.from(document.querySelectorAll('.sub-text-input'))
+                           .map(i => i.value.trim()).filter(Boolean),
+        };
+    }
+
+    /**
+     * Build a LabelDescriptor from a YAML-parsed label object.
+     */
+    buildDescriptorFromLabel(label) {
+        // Normalize maintext_columns to columns for backwards compatibility
+        if (label.maintext_columns && !label.columns) {
+            label.columns = label.maintext_columns;
+        }
+        const mainTexts = label.columns
+            ? label.columns.filter(col => col.trim())
+            : (label.title ? [label.title] : []);
+        const subTexts = label.subtext_columns
+            ? label.subtext_columns.filter(col => col.trim())
+            : (label.subtext ? [label.subtext] : []);
+
+        return {
+            width_mm: label.width_mm,
+            height_mm: label.height_mm,
+            iconKey: label.icon,
+            mainTexts,
+            subTexts,
+        };
+    }
+
     updatePreview() {
-        const iconSelect = document.getElementById('icon-select').value;
-        const height = document.getElementById('label-height').value;
-        const width = document.getElementById('label-width').value;
+        const descriptor = this.buildDescriptor();
+        const layout = LabelLayout.compute(descriptor);
 
         const labelPreview = document.getElementById('header-label-preview');
         const iconContainer = labelPreview.querySelector('.label-icon img');
 
         // Get icon path from either built-in icons or custom icons
-        const iconPath = this.icons[iconSelect] || this.customIcons[iconSelect] || this.icons['heads_hex_socket'];
+        const iconPath = this.icons[descriptor.iconKey] || this.customIcons[descriptor.iconKey] || this.icons['heads_hex_socket'];
         if (iconContainer) {
             iconContainer.src = iconPath;
-            iconContainer.alt = iconSelect;
+            iconContainer.alt = descriptor.iconKey;
         }
 
-        labelPreview.setAttribute('data-height', height);
-        labelPreview.style.width = `${width}mm`;
-        labelPreview.style.height = `${height}mm`;
-        
+        labelPreview.setAttribute('data-height', descriptor.height_mm);
+        labelPreview.style.width = `${layout.width_mm}mm`;
+        labelPreview.style.height = `${layout.height_mm}mm`;
+
         // Update CSS custom property for control positioning
-        document.documentElement.style.setProperty('--label-width', `${width}mm`);
-        
-        // Dynamically set icon size based on height (height - 2mm for 1mm margin on each side)
-        const iconSize = Math.max(6, height - 2); // Minimum 6mm, otherwise height - 2mm
+        document.documentElement.style.setProperty('--label-width', `${layout.width_mm}mm`);
+
+        // Set icon size from layout
         const labelIcon = labelPreview.querySelector('.label-icon');
-        if (labelIcon) {
-            labelIcon.style.width = `${iconSize}mm`;
-            labelIcon.style.height = `${iconSize}mm`;
+        if (labelIcon && layout.icon) {
+            labelIcon.style.width = `${layout.icon.size}mm`;
+            labelIcon.style.height = `${layout.icon.size}mm`;
         }
 
         // Check if sub text has any non-empty columns
-        const subTextColumns = document.querySelectorAll('.sub-text-column');
-        const hasSubText = Array.from(subTextColumns).some(col => col.textContent.trim());
         const subTextContainer = document.querySelector('.sub-text');
-        
-        if (!hasSubText) {
+        if (!layout.hasSubText) {
             subTextContainer.style.display = 'none';
         } else {
             subTextContainer.style.display = 'flex';
         }
-        
     }
 
     async downloadPNG() {
         try {
-            const canvas = document.createElement('canvas');
-            const ctx = canvas.getContext('2d');
-            
-            const height = parseInt(document.getElementById('label-height').value);
-            const width = parseInt(document.getElementById('label-width').value);
-            const mainTextInputs = document.querySelectorAll('.main-text-input');
-            const mainTexts = Array.from(mainTextInputs).map(input => input.value.trim()).filter(text => text);
-            const subTextInputs = document.querySelectorAll('.sub-text-input');
-            const subTexts = Array.from(subTextInputs).map(input => input.value.trim()).filter(text => text);
-            const iconSelect = document.getElementById('icon-select').value;
+            const descriptor = this.buildDescriptor();
+            const layout = LabelLayout.compute(descriptor);
             const dpi = this.validateDPI(parseInt(document.getElementById('png-dpi').value) || 96);
             const shouldRotate = document.getElementById('export-rotate').checked;
-            const mmToPx = dpi / 25.4;
-            
-            // Always set canvas to normal dimensions first (we'll rotate after drawing)
-            canvas.width = width * mmToPx;
-            canvas.height = height * mmToPx;
 
-            // Always use transparent background
+            const canvas = await CanvasRenderer.render(layout, this.icons, this.customIcons, {
+                dpi,
+                transparent: true,
+                rotate: shouldRotate,
+            });
 
-            const iconSize = (height - 2) * mmToPx;
-            const iconX = 1 * mmToPx;
-            const iconY = 1 * mmToPx;
-
-            await this.drawIcon(ctx, iconX, iconY, iconSize, iconSelect);
-
-            const textX = iconX + iconSize + (2 * mmToPx);
-            const textAreaWidth = canvas.width - textX - (1 * mmToPx);
-
-            ctx.fillStyle = 'black';
-            ctx.textAlign = 'left';
-            ctx.textBaseline = 'top';
-
-            const mainFontSize = this.calculateFontSize(height);
-            const subFontSize = mainFontSize * 0.75;
-
-            ctx.font = `bold ${mainFontSize * mmToPx}px Arial`;
-            const textY = subTexts.length > 0 ? iconY + (iconSize * 0.2) : iconY + (iconSize * 0.4);
-            
-            // Handle multiple columns for main text
-            if (mainTexts.length === 0) {
-                const defaultTexts = ['M3', 'M3', 'M3'];
-                const columnWidth = textAreaWidth / defaultTexts.length;
-                defaultTexts.forEach((text, index) => {
-                    const columnX = textX + (index * columnWidth);
-                    ctx.textAlign = 'left';
-                    ctx.fillText(text, columnX, textY);
-                });
-            } else {
-                const columnWidth = textAreaWidth / mainTexts.length;
-                mainTexts.forEach((text, index) => {
-                    const columnX = textX + (index * columnWidth);
-                    ctx.textAlign = 'left';
-                    ctx.fillText(text, columnX, textY);
-                });
-            }
-
-            // Handle multiple columns for sub text
-            ctx.font = `${subFontSize * mmToPx}px Arial`;
-            ctx.fillStyle = '#666';
-            const subTextY = textY + (mainFontSize * mmToPx * 1.2);
-            
-            if (subTexts.length === 0) {
-                const defaultSubTexts = ['8 mm', '10 mm', '12 mm'];
-                const columnWidth = textAreaWidth / defaultSubTexts.length;
-                defaultSubTexts.forEach((text, index) => {
-                    const columnX = textX + (index * columnWidth);
-                    ctx.textAlign = 'left';
-                    ctx.fillText(text, columnX, subTextY);
-                });
-            } else {
-                const columnWidth = textAreaWidth / subTexts.length;
-                subTexts.forEach((text, index) => {
-                    const columnX = textX + (index * columnWidth);
-                    ctx.textAlign = 'left';
-                    ctx.fillText(text, columnX, subTextY);
-                });
-            }
-
-            // Apply rotation if requested
-            let finalCanvas = canvas;
-            if (shouldRotate) {
-                finalCanvas = this.rotateCanvas(canvas, 90);
-            }
-            
             // Save DPI setting to localStorage
             this.saveDPISettings();
-            
+
             const link = document.createElement('a');
-            const labelName = mainTexts.length > 0 ? mainTexts.join('_') : 'label';
+            const labelName = descriptor.mainTexts.length > 0 ? descriptor.mainTexts.join('_') : 'label';
             const rotation = shouldRotate ? '_rotated' : '';
             link.download = `label-${labelName.replace(/[^a-zA-Z0-9]/g, '_')}-${dpi}dpi${rotation}.png`;
-            link.href = finalCanvas.toDataURL();
+            link.href = canvas.toDataURL();
             link.click();
         } catch (error) {
             console.error('PNG download failed:', error);
@@ -637,30 +596,20 @@ labels:
 
     async downloadSVG() {
         try {
-            const height = parseInt(document.getElementById('label-height').value);
-            const width = parseInt(document.getElementById('label-width').value);
-            const mainTextInputs = document.querySelectorAll('.main-text-input');
-            const mainTexts = Array.from(mainTextInputs).map(input => input.value.trim()).filter(text => text);
-            const subTextInputs = document.querySelectorAll('.sub-text-input');
-            const subTexts = Array.from(subTextInputs).map(input => input.value.trim()).filter(text => text);
-            const iconSelect = document.getElementById('icon-select').value;
+            const descriptor = this.buildDescriptor();
+            const layout = LabelLayout.compute(descriptor);
             const shouldRotate = document.getElementById('export-rotate').checked;
-            
-            const svg = await this.generateLabelSVG({
-                height_mm: height,
-                width_mm: width,
-                columns: mainTexts.length > 0 ? mainTexts : ['M3', 'M3', 'M3'],
-                subtext_columns: subTexts.length > 0 ? subTexts : ['8 mm', '10 mm', '12 mm'],
-                icon: iconSelect,
-                rotate: shouldRotate
+
+            const svg = await SvgRenderer.render(layout, this.icons, this.customIcons, {
+                rotate: shouldRotate,
             });
-            
+
             // Save DPI setting to localStorage
             this.saveDPISettings();
 
             const blob = new Blob([svg], { type: 'image/svg+xml' });
             const link = document.createElement('a');
-            const labelName = mainTexts.length > 0 ? mainTexts.join('_') : 'label';
+            const labelName = descriptor.mainTexts.length > 0 ? descriptor.mainTexts.join('_') : 'label';
             const rotation = shouldRotate ? '_rotated' : '';
             link.download = `label-${labelName.replace(/[^a-zA-Z0-9]/g, '_')}${rotation}.svg`;
             link.href = URL.createObjectURL(blob);
@@ -673,153 +622,12 @@ labels:
     }
 
     async generateLabelSVG(label) {
-        const originalHeight = label.height_mm;
-        const originalWidth = label.width_mm;
+        const descriptor = this.buildDescriptorFromLabel(label);
+        const layout = LabelLayout.compute(descriptor);
         const shouldRotate = label.rotate || false;
-        
-        const mainTexts = label.columns ? label.columns.filter(col => col.trim()) : [label.title];
-        const subTexts = label.subtext_columns ? label.subtext_columns.filter(col => col.trim()) : (label.subtext ? [label.subtext] : []);
-        const iconSelect = label.icon;
-        const svgDpi = 96; // Fixed SVG DPI
-
-        // Always use original dimensions for layout calculations
-        const iconSize = originalHeight - 2;
-        const iconX = 1;
-        const iconY = 1;
-        const textX = iconX + iconSize + 2;
-        const textAreaWidth = originalWidth - textX - 1;
-        
-        // For rotation, swap dimensions only for the SVG canvas
-        const canvasHeight = shouldRotate ? originalWidth : originalHeight;
-        const canvasWidth = shouldRotate ? originalHeight : originalWidth;
-
-        // Use 96 PPI for SVG (Inkscape standard)
-        const dpi = 96;
-        const mmToPx = dpi / 25.4; // ~3.78
-        const baseFontSize = this.calculateFontSize(originalHeight);
-        const mainFontSizePx = baseFontSize * mmToPx;
-        const subFontSizePx = mainFontSizePx * 0.75;
-        
-        // Convert to px-based viewBox for consistent sizing with PNG
-        const viewBoxWidth = canvasWidth * mmToPx;
-        const viewBoxHeight = canvasHeight * mmToPx;
-        const scale = mmToPx; // For converting mm coordinates to px
-
-        let svgContent = `<svg width="${canvasWidth}mm" height="${canvasHeight}mm" viewBox="0 0 ${viewBoxWidth} ${viewBoxHeight}" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-  <metadata>
-    <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-      <rdf:Description>
-        <dpi>${svgDpi}</dpi>
-        <print-dpi>${svgDpi}</print-dpi>
-      </rdf:Description>
-    </rdf:RDF>
-  </metadata>`;
-
-        // Add rotation group if needed
-        if (shouldRotate) {
-            // For 90-degree rotation, we need to rotate around the center and then translate
-            // to ensure the content fits within the swapped canvas dimensions
-            const originalViewBoxWidth = originalWidth * mmToPx;
-            const originalViewBoxHeight = originalHeight * mmToPx;
-            const centerX = originalViewBoxWidth / 2;
-            const centerY = originalViewBoxHeight / 2;
-            
-            // Calculate the translation needed after rotation to center content in new canvas
-            const translateX = (viewBoxWidth - originalViewBoxWidth) / 2;
-            const translateY = (viewBoxHeight - originalViewBoxHeight) / 2;
-            
-            svgContent += `<g transform="translate(${translateX + centerX}, ${translateY + centerY}) rotate(90) translate(${-centerX}, ${-centerY})">`;
-        }
-
-        // Add transparent background box for easier selection in design software
-        const backgroundWidth = originalWidth * mmToPx;
-        const backgroundHeight = originalHeight * mmToPx;
-        svgContent += `<rect x="0" y="0" width="${backgroundWidth}" height="${backgroundHeight}" fill="white" fill-opacity="0.01" stroke="none"/>`;
-
-        // Add icon - convert coordinates to pixel space
-        const iconXPx = iconX * scale;
-        const iconYPx = iconY * scale;
-        const iconSizePx = iconSize * scale;
-        
-        const iconPath = this.icons[iconSelect] || this.customIcons[iconSelect] || this.icons['heads_hex_socket'];
-        if (iconPath.endsWith('.svg')) {
-            try {
-                const response = await fetch(iconPath);
-                const iconSvg = await response.text();
-                const parser = new DOMParser();
-                const iconDoc = parser.parseFromString(iconSvg, 'image/svg+xml');
-                const iconSvgElement = iconDoc.documentElement;
-                
-                // Get original viewBox or width/height to calculate proper scale
-                const viewBox = iconSvgElement.getAttribute('viewBox');
-                let originalWidth = 100, originalHeight = 100; // fallback
-                
-                if (viewBox) {
-                    const parts = viewBox.split(' ');
-                    if (parts.length === 4) {
-                        originalWidth = parseFloat(parts[2]);
-                        originalHeight = parseFloat(parts[3]);
-                    }
-                } else {
-                    const widthAttr = iconSvgElement.getAttribute('width');
-                    const heightAttr = iconSvgElement.getAttribute('height');
-                    if (widthAttr) originalWidth = parseFloat(widthAttr.replace(/\D/g, ''));
-                    if (heightAttr) originalHeight = parseFloat(heightAttr.replace(/\D/g, ''));
-                }
-                
-                // Calculate scale to fit icon in square
-                const iconScale = iconSizePx / Math.max(originalWidth, originalHeight);
-                
-                // Extract the inner content and scale it properly
-                const iconContent = iconSvgElement.innerHTML;
-                svgContent += `<g transform="translate(${iconXPx},${iconYPx}) scale(${iconScale})">`;
-                svgContent += iconContent;
-                svgContent += '</g>';
-            } catch (error) {
-                console.error('Failed to embed SVG icon:', error);
-            }
-        } else {
-            // For PNG icons, embed as image
-            svgContent += `<image x="${iconXPx}" y="${iconYPx}" width="${iconSizePx}" height="${iconSizePx}" href="${iconPath}"/>`;
-        }
-
-        // Add main text - position so bottom of text is on horizontal centerline
-        const textXPx = textX * scale;
-        const textAreaWidthPx = textAreaWidth * scale;
-        const centerYPx = (originalHeight * mmToPx) / 2; // Use original height for centerline
-        const textYPx = subTexts.length > 0 ? centerYPx : centerYPx;
-        
-        if (mainTexts.length === 1) {
-            svgContent += `<text x="${textXPx}" y="${textYPx}" font-family="Arial, sans-serif" font-size="${mainFontSizePx}px" font-weight="bold" fill="black" dominant-baseline="bottom">${this.escapeXml(mainTexts[0])}</text>`;
-        } else {
-            const columnWidthPx = textAreaWidthPx / mainTexts.length;
-            mainTexts.forEach((text, index) => {
-                const columnXPx = textXPx + (index * columnWidthPx);
-                svgContent += `<text x="${columnXPx}" y="${textYPx}" font-family="Arial, sans-serif" font-size="${mainFontSizePx}px" font-weight="bold" fill="black" dominant-baseline="bottom">${this.escapeXml(text)}</text>`;
-            });
-        }
-
-        // Add sub text - position below main text with same spacing
-        if (subTexts.length > 0) {
-            const subTextYPx = textYPx + (mainFontSizePx * 0.3) + (subFontSizePx * 0.8); // Adjust spacing for new positioning
-            if (subTexts.length === 1) {
-                svgContent += `<text x="${textXPx}" y="${subTextYPx}" font-family="Arial, sans-serif" font-size="${subFontSizePx}px" fill="#666" dominant-baseline="bottom">${this.escapeXml(subTexts[0])}</text>`;
-            } else {
-                const columnWidthPx = textAreaWidthPx / subTexts.length;
-                subTexts.forEach((text, index) => {
-                    const columnXPx = textXPx + (index * columnWidthPx);
-                    svgContent += `<text x="${columnXPx}" y="${subTextYPx}" font-family="Arial, sans-serif" font-size="${subFontSizePx}px" fill="#666" dominant-baseline="bottom">${this.escapeXml(text)}</text>`;
-                });
-            }
-        }
-
-        // Close rotation group if needed
-        if (shouldRotate) {
-            svgContent += '</g>';
-        }
-
-        svgContent += '</svg>';
-        return svgContent;
+        return SvgRenderer.render(layout, this.icons, this.customIcons, {
+            rotate: shouldRotate,
+        });
     }
 
     escapeXml(str) {
@@ -830,15 +638,7 @@ labels:
                   .replace(/'/g, '&apos;');
     }
 
-    calculateFontSize(height) {
-        switch(height) {
-            case 9: return 3;
-            case 12: return 4;
-            case 18: return 6.5;
-            case 24: return 8;
-            default: return 4;
-        }
-    }
+    // calculateFontSize() removed — use LabelLayout.fontSizeForHeight() instead
 
     async drawIcon(ctx, x, y, size, iconType) {
         const iconPath = this.icons[iconType] || this.customIcons[iconType] || this.icons['heads_hex_socket'];
@@ -976,16 +776,21 @@ labels:
             for (let i = 0; i < labels.length; i++) {
                 const label = labels[i];
                 const titleText = label.title || (label.columns ? label.columns.join('_') : 'label');
-                
+                const descriptor = this.buildDescriptorFromLabel(label);
+                const layout = LabelLayout.compute(descriptor);
+
                 // Generate PNG
-                const canvas = await this.generateLabelCanvas(label, dpiSetting);
+                const canvas = await CanvasRenderer.render(layout, this.icons, this.customIcons, {
+                    dpi: dpiSetting,
+                    transparent: true,
+                });
                 const imageData = canvas.toDataURL().split(',')[1];
                 const pngFilename = `label_${i + 1}_${titleText.replace(/[^a-zA-Z0-9]/g, '_')}.png`;
                 zip.file(pngFilename, imageData, { base64: true });
-                
+
                 // Generate SVG if requested
                 if (generateSvg) {
-                    const svgContent = await this.generateLabelSVG(label);
+                    const svgContent = await SvgRenderer.render(layout, this.icons, this.customIcons, {});
                     const svgFilename = `label_${i + 1}_${titleText.replace(/[^a-zA-Z0-9]/g, '_')}.svg`;
                     zip.file(svgFilename, svgContent);
                 }
@@ -1248,76 +1053,12 @@ labels:
     }
 
     async generateLabelCanvas(label, dpi = 300) {
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
-        
-        // Normalize maintext_columns to columns for backwards compatibility
-        if (label.maintext_columns && !label.columns) {
-            label.columns = label.maintext_columns;
-        }
-        
-        const height = label.height_mm;
-        const width = label.width_mm;
-        const mainTexts = label.columns ? label.columns.filter(col => col.trim()) : [label.title];
-        const subTexts = label.subtext_columns ? label.subtext_columns.filter(col => col.trim()) : (label.subtext ? [label.subtext] : []);
-        const iconSelect = label.icon;
-        const mmToPx = dpi / 25.4;
-        
-        canvas.width = width * mmToPx;
-        canvas.height = height * mmToPx;
-
-        // Always use transparent background
-
-        const iconSize = (height - 2) * mmToPx;
-        const iconX = 1 * mmToPx;
-        const iconY = 1 * mmToPx;
-
-        await this.drawIcon(ctx, iconX, iconY, iconSize, iconSelect);
-
-        const textX = iconX + iconSize + (2 * mmToPx);
-        const textAreaWidth = canvas.width - textX - (1 * mmToPx);
-
-        ctx.fillStyle = 'black';
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'top';
-
-        const mainFontSize = this.calculateFontSize(height);
-        const subFontSize = mainFontSize * 0.75;
-
-        ctx.font = `bold ${mainFontSize * mmToPx}px Arial`;
-        const textY = subTexts.length > 0 ? iconY + (iconSize * 0.2) : iconY + (iconSize * 0.4);
-        
-        // Handle multiple columns for main text
-        if (mainTexts.length === 1) {
-            ctx.fillText(mainTexts[0], textX, textY);
-        } else {
-            const columnWidth = textAreaWidth / mainTexts.length;
-            mainTexts.forEach((text, index) => {
-                const columnX = textX + (index * columnWidth);
-                ctx.textAlign = 'left';
-                ctx.fillText(text, columnX, textY);
-            });
-        }
-
-        // Handle multiple columns for sub text
-        if (subTexts.length > 0) {
-            ctx.font = `${subFontSize * mmToPx}px Arial`;
-            ctx.fillStyle = '#666';
-            const subTextY = textY + (mainFontSize * mmToPx * 1.2);
-            
-            if (subTexts.length === 1) {
-                ctx.fillText(subTexts[0], textX, subTextY);
-            } else {
-                const columnWidth = textAreaWidth / subTexts.length;
-                subTexts.forEach((text, index) => {
-                    const columnX = textX + (index * columnWidth);
-                    ctx.textAlign = 'left';
-                    ctx.fillText(text, columnX, subTextY);
-                });
-            }
-        }
-
-        return canvas;
+        const descriptor = this.buildDescriptorFromLabel(label);
+        const layout = LabelLayout.compute(descriptor);
+        return CanvasRenderer.render(layout, this.icons, this.customIcons, {
+            dpi,
+            transparent: true,
+        });
     }
 
     async generateLongPngStrip(labels, includeCutMarks, dpi = 300) {
@@ -2063,9 +1804,15 @@ labels:
         this.niimbotClient = null;
         this.printerConnected = false;
         this.isPrinting = false;
+        this._userDisconnected = false;    // Track user-initiated disconnect
+        this._autoReconnect = false;       // Switches to true after first manual reconnect
+        this._gattQueue = Promise.resolve(); // Serialise BLE operations
 
         // Load saved settings (including connection mode)
         this.loadPrinterSettings();
+
+        // Populate label presets for the initial model selection
+        this.populateLabelPresets();
 
         // Event listeners
         const connectBtn = document.getElementById('printer-connect');
@@ -2074,6 +1821,7 @@ labels:
         const densitySlider = document.getElementById('printer-density');
         const modelSelect = document.getElementById('printer-model');
         const quantityInput = document.getElementById('printer-quantity');
+        const presetSelect = document.getElementById('printer-label-preset');
 
         if (connectBtn) connectBtn.addEventListener('click', () => this.connectPrinter());
         if (disconnectBtn) disconnectBtn.addEventListener('click', () => this.disconnectPrinter());
@@ -2087,11 +1835,18 @@ labels:
         }
 
         if (modelSelect) {
-            modelSelect.addEventListener('change', () => this.savePrinterSettings());
+            modelSelect.addEventListener('change', () => {
+                this.populateLabelPresets();
+                this.savePrinterSettings();
+            });
         }
 
         if (quantityInput) {
             quantityInput.addEventListener('change', () => this.savePrinterSettings());
+        }
+
+        if (presetSelect) {
+            presetSelect.addEventListener('change', () => this.onLabelPresetChange());
         }
 
         // Save connection mode on toggle
@@ -2122,27 +1877,48 @@ labels:
 
             this.niimbotClient.on('connect', () => {
                 this.printerConnected = true;
+                this._userDisconnected = false;
                 this.updatePrinterUI(true);
                 this.showPrinterMessage(`Connected via ${mode === 'serial' ? 'USB' : 'Bluetooth'}!`, 'success');
                 this.fetchPrinterInfo();
             });
 
-            this.niimbotClient.on('disconnect', () => {
+            this.niimbotClient.on('disconnect', async () => {
                 this.printerConnected = false;
                 this.isPrinting = false;
                 this.updatePrinterUI(false);
-                this.showPrinterMessage('Printer disconnected', 'muted');
+
+                if (this._userDisconnected) {
+                    this.showPrinterMessage('Printer disconnected', 'muted');
+                    return;
+                }
+
+                // Connection dropped unexpectedly
+                if (this._autoReconnect) {
+                    // Auto-reconnect mode (activated after first manual reconnect)
+                    this.showPrinterMessage('Connection lost. Reconnecting...', 'warning');
+                    const success = await this.attemptReconnect();
+                    if (!success) {
+                        this._autoReconnect = false;
+                        this.showReconnectButton();
+                    }
+                } else {
+                    // Manual reconnect mode (first time)
+                    this.showReconnectButton();
+                }
             });
 
             this.niimbotClient.on('printprogress', (e) => {
                 this.updatePrintProgress(e);
             });
 
-            await this.niimbotClient.connect();
+            await this.connectWithTimeout();
 
-            // macOS USB CDC needs longer packet intervals (default 10ms saturates the port)
+            // Packet interval tuning for macOS
             if (mode === 'serial' && this.niimbotClient.setPacketInterval) {
-                this.niimbotClient.setPacketInterval(50);
+                this.niimbotClient.setPacketInterval(50); // macOS USB CDC
+            } else if (mode === 'bluetooth' && this.niimbotClient.setPacketInterval) {
+                this.niimbotClient.setPacketInterval(30); // BLE on macOS
             }
 
         } catch (error) {
@@ -2162,6 +1938,7 @@ labels:
     }
 
     async disconnectPrinter() {
+        this._userDisconnected = true;
         try {
             if (this.niimbotClient) {
                 this.niimbotClient.disconnect();
@@ -2172,7 +1949,69 @@ labels:
         }
         this.printerConnected = false;
         this.isPrinting = false;
+        this._autoReconnect = false;
         this.updatePrinterUI(false);
+    }
+
+    /**
+     * Wrap gatt.connect() with a timeout to prevent hanging on macOS.
+     */
+    async connectWithTimeout(timeoutMs = 15000) {
+        const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Connection timed out (15s). Is the printer on and nearby?')), timeoutMs)
+        );
+        return Promise.race([this.niimbotClient.connect(), timeoutPromise]);
+    }
+
+    /**
+     * Reconnect with exponential backoff.
+     * Returns true on success, false after all retries exhausted.
+     */
+    async attemptReconnect(maxRetries = 4) {
+        let delay = 2000;
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            this.showPrinterMessage(`Reconnecting... (attempt ${attempt}/${maxRetries})`, 'warning');
+            try {
+                await this.connectWithTimeout(10000);
+                this.showPrinterMessage('Reconnected!', 'success');
+                return true;
+            } catch (e) {
+                console.warn(`[Printer] Reconnect attempt ${attempt} failed:`, e.message);
+                if (attempt < maxRetries) {
+                    await new Promise(r => setTimeout(r, delay));
+                    delay = Math.min(delay * 2, 16000);
+                }
+            }
+        }
+        this.showPrinterMessage('Could not reconnect. Click Reconnect to try again.', 'danger');
+        return false;
+    }
+
+    /**
+     * Show a reconnect button in the printer message area.
+     * When clicked, attempts reconnection and then switches to auto-reconnect mode.
+     */
+    showReconnectButton() {
+        const msg = document.getElementById('printer-message');
+        if (!msg) return;
+        msg.style.display = 'block';
+        msg.className = 'mt-2 small text-warning';
+        msg.innerHTML = `Connection lost. <button class="btn btn-sm btn-outline-warning ms-2" id="printer-reconnect-btn">\u{1F517} Reconnect</button>`;
+
+        const btn = document.getElementById('printer-reconnect-btn');
+        if (btn) {
+            btn.addEventListener('click', async () => {
+                btn.disabled = true;
+                btn.textContent = 'Reconnecting...';
+                const success = await this.attemptReconnect();
+                if (success) {
+                    this._autoReconnect = true; // Switch to auto mode after successful manual reconnect
+                } else {
+                    btn.disabled = false;
+                    btn.textContent = '\u{1F517} Reconnect';
+                }
+            }, { once: true });
+        }
     }
 
     async fetchPrinterInfo() {
@@ -2197,104 +2036,123 @@ labels:
                     modelEl.textContent = `\u{1F4F1} FW: ${info.softwareVersion}`;
                 }
             }
+
+            // ── Auto-apply label preset from printer model ──────────
+            this.populateLabelPresets();
+            this.onLabelPresetChange();
+
         } catch (error) {
             console.warn('[Printer] Could not fetch printer info:', error);
+        }
+    }
+
+    // ── Label size presets per printer model ────────────────────────────
+    // Common Niimbot label rolls. First entry per model is the default.
+    static LABEL_PRESETS = {
+        D110:   [
+            { label: '15 × 30 mm', w: 30, h: 15 },
+            { label: '12 × 30 mm', w: 30, h: 12 },
+            { label: '12 × 40 mm', w: 40, h: 12 },
+            { label: '15 × 50 mm', w: 50, h: 15 },
+            { label: '12 × 22 mm', w: 22, h: 12 },
+        ],
+        D11_V1: [
+            { label: '15 × 30 mm', w: 30, h: 15 },
+            { label: '12 × 30 mm', w: 30, h: 12 },
+            { label: '12 × 40 mm', w: 40, h: 12 },
+        ],
+        B21_V1: [
+            { label: '40 × 30 mm', w: 30, h: 40 },
+            { label: '50 × 30 mm', w: 30, h: 50 },
+            { label: '50 × 50 mm', w: 50, h: 50 },
+            { label: '50 × 80 mm', w: 80, h: 50 },
+            { label: '30 × 20 mm', w: 20, h: 30 },
+        ],
+        B1:     [
+            { label: '40 × 30 mm', w: 30, h: 40 },
+            { label: '50 × 30 mm', w: 30, h: 50 },
+            { label: '50 × 50 mm', w: 50, h: 50 },
+            { label: '50 × 80 mm', w: 80, h: 50 },
+            { label: '40 × 60 mm', w: 60, h: 40 },
+        ],
+    };
+
+    /**
+     * Populate the label-preset dropdown based on the currently selected
+     * printer model. Restores the last-used preset from localStorage.
+     */
+    populateLabelPresets() {
+        const presetSelect = document.getElementById('printer-label-preset');
+        const modelSelect  = document.getElementById('printer-model');
+        if (!presetSelect || !modelSelect) return;
+
+        const model   = modelSelect.value;
+        const presets = LabelMaker.LABEL_PRESETS[model] || LabelMaker.LABEL_PRESETS.D110;
+
+        // Remember previous selection (if any)
+        const savedPreset = this._savedLabelPreset || '';
+
+        presetSelect.innerHTML = '';
+        presets.forEach((p, idx) => {
+            const opt   = document.createElement('option');
+            opt.value   = `${p.w}x${p.h}`;
+            opt.textContent = p.label;
+            if (opt.value === savedPreset) opt.selected = true;
+            presetSelect.appendChild(opt);
+        });
+    }
+
+    /**
+     * Called when the user picks a label preset or on connection.
+     * Applies the selected dimensions to the width/height inputs
+     * and refreshes the preview.
+     */
+    onLabelPresetChange() {
+        const presetSelect = document.getElementById('printer-label-preset');
+        if (!presetSelect) return;
+
+        const val = presetSelect.value; // e.g. "30x15"
+        if (!val) return;
+
+        const [w, h] = val.split('x').map(Number);
+        if (!w || !h) return;
+
+        const widthInput  = document.getElementById('label-width');
+        const heightInput = document.getElementById('label-height');
+
+        const oldW = parseInt(widthInput.value);
+        const oldH = parseInt(heightInput.value);
+
+        widthInput.value  = w;
+        heightInput.value = h;
+
+        this._savedLabelPreset = val;
+        this.savePrinterSettings();
+        this.updatePreview();
+
+        if (oldW !== w || oldH !== h) {
+            this.showPrinterMessage(
+                `Label size set to ${h} × ${w} mm`,
+                'success'
+            );
         }
     }
 
 
 
     /**
-     * Render the label at exact pixel dimensions for the printer.
-     * Renders directly to the pixel grid, then thresholds to 1-bit B/W for thermal printing.
+     * Render the label for the thermal printer using ThermalRenderer.
+     * Uses the same LabelLayout as all other renderers for consistency.
      */
-    async renderForPrinterNative(widthPx, heightPx) {
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
+    async renderForPrinterNative(printheadPixels, printDirection, dpi) {
+        const descriptor = this.buildDescriptor();
+        const layout = LabelLayout.compute(descriptor);
 
-        const mainTextInputs = document.querySelectorAll('.main-text-input');
-        const mainTexts = Array.from(mainTextInputs).map(input => input.value.trim()).filter(text => text);
-        const subTextInputs = document.querySelectorAll('.sub-text-input');
-        const subTexts = Array.from(subTextInputs).map(input => input.value.trim()).filter(text => text);
-        const iconSelect = document.getElementById('icon-select').value;
-
-        canvas.width = widthPx;
-        canvas.height = heightPx;
-
-        // pxPerUnit: treat the canvas as a unit grid (height = 1.0)
-        // All layout is proportional to the height
-        const pxPerUnit = heightPx;
-
-        // White background (required for thermal printing — no transparency)
-        ctx.fillStyle = 'white';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-        // Draw icon (square, with margin)
-        const margin = Math.round(pxPerUnit * 0.06);
-        const iconSize = heightPx - (2 * margin);
-        const iconX = margin;
-        const iconY = margin;
-        await this.drawIcon(ctx, iconX, iconY, iconSize, iconSelect);
-
-        // Draw text
-        const textX = iconX + iconSize + Math.round(pxPerUnit * 0.12);
-        const textAreaWidth = canvas.width - textX - margin;
-
-        ctx.fillStyle = 'black';
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'top';
-
-        // Font sizes proportional to canvas height
-        const mainFontSize = Math.round(heightPx * 0.35);
-        const subFontSize = Math.round(mainFontSize * 0.7);
-
-        // Main text
-        ctx.font = `bold ${mainFontSize}px Arial`;
-        const textY = subTexts.length > 0 ? iconY + Math.round(iconSize * 0.1) : iconY + Math.round(iconSize * 0.3);
-
-        if (mainTexts.length === 0) {
-            const defaultTexts = ['M3', 'M3', 'M3'];
-            const columnWidth = textAreaWidth / defaultTexts.length;
-            defaultTexts.forEach((text, index) => {
-                ctx.fillText(text, textX + (index * columnWidth), textY);
-            });
-        } else {
-            const columnWidth = textAreaWidth / mainTexts.length;
-            mainTexts.forEach((text, index) => {
-                ctx.fillText(text, textX + (index * columnWidth), textY);
-            });
-        }
-
-        // Sub text
-        ctx.font = `${subFontSize}px Arial`;
-        ctx.fillStyle = 'black';
-        const subTextY = textY + Math.round(mainFontSize * 1.15);
-
-        if (subTexts.length === 0) {
-            const defaultSubTexts = ['8 mm', '10 mm', '12 mm'];
-            const columnWidth = textAreaWidth / defaultSubTexts.length;
-            defaultSubTexts.forEach((text, index) => {
-                ctx.fillText(text, textX + (index * columnWidth), subTextY);
-            });
-        } else {
-            const columnWidth = textAreaWidth / subTexts.length;
-            subTexts.forEach((text, index) => {
-                ctx.fillText(text, textX + (index * columnWidth), subTextY);
-            });
-        }
-
-        // Threshold to 1-bit black/white for thermal printing
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const data = imageData.data;
-        const thresholdVal = 140;
-        for (let i = 0; i < data.length; i += 4) {
-            const gray = data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114;
-            const bw = gray < thresholdVal ? 0 : 255;
-            data[i] = data[i+1] = data[i+2] = bw;
-        }
-        ctx.putImageData(imageData, 0, 0);
-
-        return canvas;
+        return ThermalRenderer.render(layout, this.icons, this.customIcons, {
+            printheadPixels,
+            printDirection,
+            dpi,
+        });
     }
 
     async printLabel() {
@@ -2324,24 +2182,9 @@ labels:
             const meta = this.niimbotClient.getModelMetadata();
             const printDirection = meta?.printDirection || 'left';
             const printheadPixels = meta?.printheadPixels || 96;
-            const labelWidthMm = parseInt(document.getElementById('label-width').value);
-            const labelHeightMm = parseInt(document.getElementById('label-height').value);
             const dpi = meta?.dpi || 203;
-            const mmToPx = dpi / 25.4;
 
-            // Column axis must equal printheadPixels
-            let canvasW, canvasH;
-            if (printDirection === 'left') {
-                canvasH = printheadPixels;
-                canvasW = Math.round(labelWidthMm * mmToPx);
-            } else {
-                canvasW = printheadPixels;
-                canvasH = Math.round(labelHeightMm * mmToPx);
-            }
-
-
-
-            const canvas = await this.renderForPrinterNative(canvasW, canvasH);
+            const canvas = await this.renderForPrinterNative(printheadPixels, printDirection, dpi);
 
             const encoded = niimbluelib.ImageEncoder.encodeCanvas(canvas, printDirection);
 
@@ -2511,6 +2354,9 @@ labels:
                 );
                 if (radio && !radio.disabled) radio.checked = true;
             }
+            if (saved.labelPreset) {
+                this._savedLabelPreset = saved.labelPreset;
+            }
         } catch (error) {
             console.warn('[Printer] Could not load settings:', error);
         }
@@ -2523,6 +2369,7 @@ labels:
                 density: document.getElementById('printer-density')?.value || '3',
                 quantity: document.getElementById('printer-quantity')?.value || '1',
                 connectionMode: this.getConnectionMode(),
+                labelPreset: this._savedLabelPreset || '',
             };
             localStorage.setItem('printerSettings', JSON.stringify(settings));
         } catch (error) {
